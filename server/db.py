@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -32,6 +33,37 @@ def database():
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sprite_cache_key(version, source_url):
+    return hashlib.sha256(f"{version}\0{source_url}".encode("utf-8")).hexdigest()[:24]
+
+
+def _sprite_sources(store):
+    return {
+        entry.get("sprite")
+        for group in (store.get("catalog", []), store.get("calculator", []))
+        for entry in group
+        if str(entry.get("sprite") or "").startswith("https://championsbattledata.com/")
+    }
+
+
+def _register_sprite_sources(connection, season_id, version, source_urls):
+    for source_url in source_urls:
+        if not str(source_url or "").startswith("https://championsbattledata.com/"):
+            continue
+        cache_key = _sprite_cache_key(version, source_url)
+        connection.execute(
+            """INSERT INTO sprite_assets(cache_key,season_id,source_url,local_path)
+               VALUES(?,?,?,?)
+               ON CONFLICT(season_id,source_url) DO UPDATE SET
+                 cache_key=excluded.cache_key,
+                 local_path=excluded.local_path,
+                 mime_type=CASE WHEN sprite_assets.cache_key=excluded.cache_key THEN sprite_assets.mime_type END,
+                 byte_size=CASE WHEN sprite_assets.cache_key=excluded.cache_key THEN sprite_assets.byte_size END,
+                 fetched_at=CASE WHEN sprite_assets.cache_key=excluded.cache_key THEN sprite_assets.fetched_at END""",
+            (cache_key, season_id, source_url, cache_key),
+        )
 
 
 def seed_static(connection):
@@ -88,6 +120,14 @@ def init_database():
     with database() as connection:
         connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         seed_static(connection)
+        for season in connection.execute("SELECT id,code,data_version FROM seasons"):
+            urls = {
+                row["sprite"]
+                for table in ("pokemon_species", "pokemon_forms")
+                for row in connection.execute(f"SELECT sprite FROM {table} WHERE season_id=?", (season["id"],))
+                if row["sprite"]
+            }
+            _register_sprite_sources(connection, season["id"], season["data_version"] or season["code"], urls)
         connection.commit()
 
 
@@ -155,32 +195,112 @@ def save_snapshot(store, raw_payload, aliases=None):
         )
         connection.executemany("INSERT INTO season_items(season_id,item_name) VALUES(?,?)", [(season_id, name) for name in store["items"]])
         connection.execute("INSERT INTO source_snapshots(season_id,payload_json) VALUES(?,?)", (season_id, _json(raw_payload)))
+        sprite_version = meta.get("dataVersion") or meta["season"]
+        _register_sprite_sources(connection, season_id, sprite_version, _sprite_sources(store))
         if aliases:
             connection.execute("DELETE FROM translations WHERE kind='pokemon_api'")
             connection.executemany("INSERT INTO translations(kind,source_name,zh_name) VALUES('pokemon_api',?,?)", aliases.items())
         connection.commit()
 
 
+def _season_meta(connection, season):
+    if not season:
+        return None
+    return {
+        "season": season["code"],
+        "generatedAt": season["generated_at"],
+        "dataVersion": season["data_version"],
+        "source": season["source"],
+        "rosterCount": connection.execute(
+            "SELECT COUNT(*) FROM pokemon_forms WHERE season_id=?", (season["id"],)
+        ).fetchone()[0],
+    }
+
+
+def _active_season(connection):
+    return connection.execute(
+        "SELECT * FROM seasons WHERE is_active=1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+
+def _sprite_map(connection, season_id):
+    return {
+        row["source_url"]: f"/api/sprites/{row['cache_key']}"
+        for row in connection.execute(
+            "SELECT cache_key,source_url FROM sprite_assets WHERE season_id=?", (season_id,)
+        )
+    }
+
+
+def _slim_top_entry(entry):
+    if not entry:
+        return None
+    fields = (
+        "name", "percentage", "hp_points", "attack_points", "defense_points",
+        "sp_atk_points", "sp_def_points", "speed_points",
+    )
+    return {key: entry.get(key) for key in fields if entry.get(key) not in (None, "")}
+
+
 def load_bootstrap():
     with database() as connection:
         static = static_data(connection)
-        season = connection.execute("SELECT * FROM seasons WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+        season = _active_season(connection)
+        return {"static": static, "meta": _season_meta(connection, season)}
+
+
+def load_usage(format_name):
+    if format_name not in ("Doubles", "Singles"):
+        raise ValueError("对战形式必须是 Doubles 或 Singles")
+    with database() as connection:
+        season = _active_season(connection)
         if not season:
-            return {"static": static, "meta": None, "aliases": {}, "catalog": [], "calculator": [], "items": static["implementedItems"]}
+            return {"meta": None, "format": format_name, "catalog": []}
         sid = season["id"]
+        sprites = _sprite_map(connection, sid)
         catalog = []
         for row in connection.execute("SELECT * FROM pokemon_species WHERE season_id=? ORDER BY id", (sid,)):
-            catalog.append({"name":row["name"],"displayName":row["display_name"],"slug":row["slug"],"sprite":row["sprite"],"types":json.loads(row["types_json"]),"stats":json.loads(row["stats_json"]),"battles":json.loads(row["battles_json"])})
+            battle = (json.loads(row["battles_json"]) or {}).get(format_name) or {}
+            position = battle.get("position")
+            if not isinstance(position, int) or not 1 <= position <= 50:
+                continue
+            top = battle.get("top") or {}
+            values = battle.get("values") or {}
+            slim_battle = {
+                "position": position,
+                "top": {key: _slim_top_entry(top.get(key)) for key in (
+                    "move", "held_item", "stat_alignment", "stat_points", "ability"
+                )},
+                "values": {
+                    "move": (values.get("move") or [])[:4],
+                    "held_item": (values.get("held_item") or [])[:3],
+                    "ability": (values.get("ability") or [])[:2],
+                },
+            }
+            catalog.append({
+                "name": row["name"], "displayName": row["display_name"],
+                "slug": row["slug"], "sprite": sprites.get(row["sprite"], row["sprite"]),
+                "types": json.loads(row["types_json"]), "battles": {format_name: slim_battle},
+            })
+        catalog.sort(key=lambda entry: entry["battles"][format_name]["position"])
+        return {"meta": _season_meta(connection, season), "format": format_name, "catalog": catalog}
+
+
+def load_calculator():
+    with database() as connection:
+        static = static_data(connection)
+        season = _active_season(connection)
+        if not season:
+            return {"meta": None, "calculator": [], "items": static["implementedItems"]}
+        sid = season["id"]
+        sprites = _sprite_map(connection, sid)
         calculator = []
         for row in connection.execute("SELECT * FROM pokemon_forms WHERE season_id=? ORDER BY display_name", (sid,)):
-            calculator.append({"name":row["name"],"baseName":row["base_name"],"displayName":row["display_name"],"baseDisplayName":row["base_display_name"],"searchText":row["search_text"],"slug":row["slug"],"sprite":row["sprite"],"types":json.loads(row["types_json"]),"stats":json.loads(row["stats_json"]),"learnableMoves":json.loads(row["learnable_moves_json"])})
-        aliases = {row["source_name"]: row["zh_name"] for row in connection.execute("SELECT source_name,zh_name FROM translations WHERE kind='pokemon_api'")}
+            calculator.append({"name":row["name"],"baseName":row["base_name"],"displayName":row["display_name"],"baseDisplayName":row["base_display_name"],"searchText":row["search_text"],"slug":row["slug"],"sprite":sprites.get(row["sprite"], row["sprite"]),"types":json.loads(row["types_json"]),"stats":json.loads(row["stats_json"]),"learnableMoves":json.loads(row["learnable_moves_json"])})
         season_items = [row["item_name"] for row in connection.execute("SELECT item_name FROM season_items WHERE season_id=?", (sid,))]
         season_items.sort(key=lambda name: static["itemZh"].get(name, name))
         return {
-            "static": static,
-            "meta": {"season":season["code"],"generatedAt":season["generated_at"],"dataVersion":season["data_version"],"source":season["source"]},
-            "aliases": aliases, "catalog": catalog, "calculator": calculator,
+            "meta": _season_meta(connection, season), "calculator": calculator,
             "items": season_items,
         }
 
@@ -194,9 +314,54 @@ def replace_api_aliases(aliases):
 
 def health_info():
     with database() as connection:
-        season = connection.execute("SELECT code FROM seasons WHERE is_active=1 LIMIT 1").fetchone()
+        season = _active_season(connection)
+        sprite_counts = connection.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN fetched_at IS NOT NULL THEN 1 ELSE 0 END) AS cached
+               FROM sprite_assets WHERE season_id=?""",
+            (season["id"],),
+        ).fetchone() if season else {"total": 0, "cached": 0}
         return {
             "database": str(DB_PATH), "season": season["code"] if season else None,
+            "dataVersion": season["data_version"] if season else None,
             "species": connection.execute("SELECT COUNT(*) FROM pokemon_species").fetchone()[0],
             "forms": connection.execute("SELECT COUNT(*) FROM pokemon_forms").fetchone()[0],
+            "sprites": {"cached": sprite_counts["cached"] or 0, "total": sprite_counts["total"]},
         }
+
+
+def get_sprite_asset(cache_key):
+    with database() as connection:
+        row = connection.execute(
+            "SELECT * FROM sprite_assets WHERE cache_key=?", (cache_key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def mark_sprite_cached(cache_key, mime_type, byte_size):
+    with database() as connection:
+        connection.execute(
+            "UPDATE sprite_assets SET mime_type=?,byte_size=?,fetched_at=? WHERE cache_key=?",
+            (mime_type, byte_size, datetime.now(timezone.utc).isoformat(), cache_key),
+        )
+        connection.commit()
+
+
+def pending_sprite_assets():
+    with database() as connection:
+        season = _active_season(connection)
+        if not season:
+            return []
+        priority_urls = set()
+        for row in connection.execute(
+            "SELECT sprite,battles_json FROM pokemon_species WHERE season_id=?", (season["id"],)
+        ):
+            battles = json.loads(row["battles_json"])
+            if any(isinstance((battle or {}).get("position"), int) and (battle or {}).get("position") <= 50 for battle in battles.values()):
+                priority_urls.add(row["sprite"])
+        rows = [dict(row) for row in connection.execute(
+            "SELECT * FROM sprite_assets WHERE season_id=? ORDER BY fetched_at IS NOT NULL,cache_key",
+            (season["id"],),
+        )]
+        rows.sort(key=lambda row: (row["source_url"] not in priority_urls, row["fetched_at"] is not None))
+        return rows

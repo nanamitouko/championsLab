@@ -3,6 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DATABASE_PATH=/data/champions.sqlite3 \
+    SPRITE_DIR=/data/sprites \
     PORT=8000
 
 WORKDIR /app
@@ -11,7 +12,7 @@ RUN pip install --no-cache-dir -r server/requirements.txt
 
 COPY server ./server
 COPY dist ./dist
-RUN mkdir -p /data && useradd --create-home --uid 10001 champion && chown -R champion:champion /app /data
+RUN mkdir -p /data/sprites && useradd --create-home --uid 10001 champion && chown -R champion:champion /app /data
 
 USER champion
 EXPOSE 8000

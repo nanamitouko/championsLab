@@ -4,9 +4,10 @@ services:
       context: .
     container_name: champions-local
     ports:
-      - "4173:8000"
+      - "127.0.0.1:4173:8000"
     environment:
       DATABASE_PATH: /data/champions.sqlite3
+      SPRITE_DIR: /data/sprites
       AUTO_REFRESH: "1"
     volumes:
       - champions_data:/data
