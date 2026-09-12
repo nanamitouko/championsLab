@@ -1,9 +1,4 @@
-const {
-  API_ORIGIN, API_URL, POKEAPI_GRAPHQL, CACHE_KEY,
-  TYPES, TYPE_ZH, TYPE_CHART: C, NAME_ZH, ITEM_ZH, MOVE_ZH, ABILITY_ZH,
-  NATURE_ZH, NATURES, IMPLEMENTED_ITEMS, MOVES, FALLBACK_TOP,
-  STAT_KEYS, STAT_LABELS, DEFAULT_POINTS
-} = window.CHAMPION_DATA;
+let TYPES=[],TYPE_ZH={},C={},TYPE_COLORS={},NAME_ZH={},ITEM_ZH={},MOVE_ZH={},ABILITY_ZH={},NATURE_ZH={},NATURES=[],IMPLEMENTED_ITEMS=[],MOVES=[],STAT_KEYS=[],STAT_LABELS={},DEFAULT_POINTS={attacker:{},defender:{}};
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -30,51 +25,16 @@ const zhItem = name => ITEM_ZH[name] || name || '暂无';
 const zhMove = name => MOVE_ZH[name] || name || '暂无';
 const zhAbility = name => ABILITY_ZH[name] || name || '暂无';
 const zhNature = name => NATURE_ZH[name] || name || '暂无';
-const typeColor = t => ({火:'#ff705f',水:'#4ba4ff',电:'#ffd84c',草:'#62ce77',冰:'#71d9e8',格斗:'#e2604f',毒:'#b55bd4',地面:'#d4a95c',飞行:'#78a8e8',超能力:'#fa6d9c',虫:'#99c43a',岩石:'#ba9f61',幽灵:'#8067c7',龙:'#6d64e8',恶:'#657080',钢:'#8ca6b8',妖精:'#ed8fbe',一般:'#9ba3a8'}[t] || '#9ba3a8');
-const assetUrl = path => path ? new URL(path, `${API_ORIGIN}/`).href : '';
+const typeColor = t => TYPE_COLORS[t] || '#9ba3a8';
 const pct = entry => entry?.percentage ? ` ${entry.percentage}` : '';
 
-let store = {meta:null,catalog:[],calculator:[],items:[...IMPLEMENTED_ITEMS]};
+let store = {meta:null,catalog:[],calculator:[],items:[]};
 let ranking = [], selectedRank = 0;
-const calcState={
-  attacker:{pokemonIndex:0,pokemonSlug:null,nature:'Adamant',item:'No Item',points:{...DEFAULT_POINTS.attacker}},
-  defender:{pokemonIndex:1,pokemonSlug:null,nature:'Bold',item:'No Item',points:{...DEFAULT_POINTS.defender}},
-  battle:{format:'Doubles',target:'single',weather:'none',terrain:'none',attackerGrounded:'auto',defenderGrounded:'auto',reflect:false,lightScreen:false,auroraVeil:false,burn:false,critical:false,helpingHand:false,friendGuard:false}
-};
+let calcState;
 
-function compactBattle(battle){
-  if(!battle) return null;
-  return {position:battle.position ?? null,top:battle.top || {},values:battle.values || {}};
-}
-async function fetchChineseAliases(){
-  const query='query ChampionGridNames { pokemon_v2_pokemonspeciesname(where: {language_id: {_eq: 12}}) { name pokemon_v2_pokemonspecy { name } } }';
-  const response=await fetch(POKEAPI_GRAPHQL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})});
-  if(!response.ok) throw new Error(`中文名称 HTTP ${response.status}`);
-  const payload=await response.json();
-  return Object.fromEntries((payload.data?.pokemon_v2_pokemonspeciesname||[]).map(row=>[row.pokemon_v2_pokemonspecy?.name,row.name]).filter(x=>x[0]&&x[1]));
-}
-function normalizeApi(data,aliases={}){
-  chineseAliases={...aliases};
-  const season = String(data.dailyDataFolders?.[0] || data.battleDataFolders?.[0] || data.defaultSeason || '未知').split('/')[0];
-  const seenForms = new Set(), calculator = [], observedItems = new Set();
-  const catalog = (data.pokemon || []).map(p=>{
-    const summary=p.summary||{},primary=summary.primary||{};
-    const battles={Doubles:compactBattle(summary.battleSummary?.Current?.Doubles),Singles:compactBattle(summary.battleSummary?.Current?.Singles)};
-    Object.values(battles).forEach(b=>b?.values?.held_item?.forEach(x=>observedItems.add(x)));
-    const forms=summary.forms?.length?summary.forms:[primary];
-    forms.forEach(form=>{
-      const key=form.slug||`${p.slug}-${form.title}`; if(seenForms.has(key))return; seenForms.add(key);
-      const name=form.title||form.form_name||p.name,displayName=localizedFormName(name,p.name),baseDisplayName=zhName(p.name);
-      const searchText=[name,p.name,p.slug,p.showdownName,p.showdownId,displayName,baseDisplayName,form.form_name,form.saved_name].filter(Boolean).join(' ').toLowerCase();
-      calculator.push({name,baseName:p.name,displayName,baseDisplayName,searchText,slug:key,sprite:assetUrl(form.image_path||summary.sprite),types:(form.types||summary.types||[]).map(t=>TYPE_ZH[t]||t),stats:{hp:+form.hp||1,atk:+form.attack||1,def:+form.defense||1,spa:+form.sp_attack||1,spd:+form.sp_defense||1,spe:+form.speed||1},learnableMoves:p.learnableMoveNames||[]});
-    });
-    return {name:p.name,displayName:zhName(p.name),slug:p.slug,sprite:assetUrl(summary.sprite||primary.image_path),types:(summary.types||primary.types||[]).map(t=>TYPE_ZH[t]||t),battles,stats:{hp:+primary.hp||1,atk:+primary.attack||1,def:+primary.defense||1,spa:+primary.sp_attack||1,spd:+primary.sp_defense||1,spe:+primary.speed||1}};
-  });
-  return {meta:{generatedAt:data.generatedAt,dataVersion:data.dataVersion,season,source:'Champions Battle Data'},aliases:chineseAliases,catalog,calculator:calculator.sort((a,b)=>a.displayName.localeCompare(b.displayName,'zh-CN')),items:[...new Set([...IMPLEMENTED_ITEMS,...observedItems])].filter(Boolean).sort((a,b)=>zhItem(a).localeCompare(zhItem(b),'zh-CN'))};
-}
-function fallbackStore(){
-  return {meta:{generatedAt:'2026-09-09T14:53:22.594Z',dataVersion:'bundled-m5',season:'M5',source:'内置备用快照'},catalog:FALLBACK_TOP.map((x,i)=>({name:x[0],displayName:zhName(x[0]),slug:x[0].toLowerCase().replace(/[^a-z0-9]+/g,'-'),sprite:`${API_ORIGIN}/pokemon_champions_assets/pokemon/${encodeURIComponent(x[0])}.png`,types:x.slice(1).map(t=>TYPE_ZH[t]),battles:{Doubles:{position:i+1,top:{},values:{}},Singles:null},stats:null})),calculator:[],items:[...IMPLEMENTED_ITEMS]};
-}
+function hydrateStatic(data){TYPES=data.types;TYPE_ZH=data.typeZh;C=data.typeChart;TYPE_COLORS=data.typeColors;NAME_ZH=data.nameZh;ITEM_ZH=data.itemZh;MOVE_ZH=data.moveZh;ABILITY_ZH=data.abilityZh;NATURE_ZH=data.natureZh;NATURES=data.natures;IMPLEMENTED_ITEMS=data.implementedItems;MOVES=data.moves;STAT_KEYS=data.statKeys;STAT_LABELS=data.statLabels;DEFAULT_POINTS=data.defaultPoints;}
+function createCalcState(){return {attacker:{pokemonIndex:0,pokemonSlug:null,nature:'Adamant',item:'No Item',points:{...DEFAULT_POINTS.attacker}},defender:{pokemonIndex:1,pokemonSlug:null,nature:'Bold',item:'No Item',points:{...DEFAULT_POINTS.defender}},battle:{format:'Doubles',target:'single',weather:'none',terrain:'none',attackerGrounded:'auto',defenderGrounded:'auto',reflect:false,lightScreen:false,auroraVeil:false,burn:false,critical:false,helpingHand:false,friendGuard:false}};}
+
 function setStatus(message,kind=''){const box=$('#update-status');box.textContent=message;box.className=`update-status ${kind}`.trim();}
 function dateText(value){if(!value)return '时间未知';try{return new Intl.DateTimeFormat('zh-CN',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Shanghai'}).format(new Date(value));}catch{return value;}}
 function applyStore(next,{fromCache=false}={}){
@@ -82,12 +42,12 @@ function applyStore(next,{fromCache=false}={}){
   ranking=store.catalog.filter(m=>{const p=m.battles?.[format]?.position;return Number.isFinite(p)&&p>0&&p<=50;}).sort((a,b)=>a.battles[format].position-b.battles[format].position);
   $('#season-label').textContent=`赛季 ${store.meta?.season||'未知'}`;$('#format-label').textContent=format==='Doubles'?'双打':'单打';$('#snapshot-label').textContent=`WEEKLY BATTLE DATA / ${store.meta?.season||'UNKNOWN'}`;$('#roster-count').textContent=store.calculator.length||store.catalog.length||'—';$('#top-pokemon').textContent=ranking[0]?.displayName||'暂无';$('#top-format').textContent=format==='Doubles'?'双打使用第 1':'单打使用第 1';$('#data-season').textContent=store.meta?.season||'未知';$('#data-date').textContent=dateText(store.meta?.generatedAt);$('#footer-snapshot').textContent=`${store.meta?.season||'未知'} · ${dateText(store.meta?.generatedAt)}`;
   renderRanking($('#usage-search').value);selectedRank=Math.min(selectedRank,Math.max(0,ranking.length-1));if(ranking.length)selectConfig(selectedRank);else $('#config-panel').innerHTML='<div class="panel-empty">当前形式暂无可用排名。</div>';refreshCalculator();
-  if(store.meta?.season==='M5')setStatus(`${fromCache?'已读取本机缓存。':'更新完成。'}镜像最新快照仍为 M5（${dateText(store.meta.generatedAt)}），等待源站发布新赛季后可再次点击更新。`,'warn');else setStatus(`${fromCache?'已读取本机缓存':'更新完成'}：${store.meta?.season||'未知赛季'}，生成于 ${dateText(store.meta?.generatedAt)}。`,'success');
+  if(store.meta?.season==='M5')setStatus(`${fromCache?'已从 SQLite 读取。':'更新完成。'}镜像最新快照仍为 M5（${dateText(store.meta.generatedAt)}），等待源站发布新赛季后可再次点击更新。`,'warn');else setStatus(`${fromCache?'已从 SQLite 读取':'更新完成'}：${store.meta?.season||'未知赛季'}，生成于 ${dateText(store.meta?.generatedAt)}。`,'success');
 }
 async function updateData({silent=false}={}){
   const button=$('#refresh-data');button.disabled=true;button.classList.add('loading');if(!silent)setStatus('正在从 Battle Data 镜像读取最新赛季数据…');
-  try{const [response,aliases]=await Promise.all([fetch(`${API_URL}?t=${Date.now()}`,{cache:'no-store'}),fetchChineseAliases().catch(error=>{console.warn('中文名称更新失败，继续使用现有映射',error);return chineseAliases;})]);if(!response.ok)throw new Error(`HTTP ${response.status}`);const next=normalizeApi(await response.json(),aliases);if(!next.catalog.length)throw new Error('数据为空');try{localStorage.setItem(CACHE_KEY,JSON.stringify(next));}catch(error){console.warn('无法写入本机缓存',error);}applyStore(next);}
-  catch(error){console.error(error);if(!store.catalog.length)applyStore(fallbackStore());setStatus(`更新失败：${error.message}。已保留${store.meta?.source==='内置备用快照'?'内置 M5 备用排名':'上次成功数据'}；请稍后重试。`,'error');}
+  try{const response=await fetch('/api/refresh',{method:'POST',headers:{'Accept':'application/json'}});const payload=await response.json();if(!response.ok)throw new Error(payload.error||`HTTP ${response.status}`);applyStore(payload.data);}
+  catch(error){console.error(error);setStatus(`更新失败：${error.message}。SQLite 中的上次成功数据已保留；请稍后重试。`,'error');}
   finally{button.disabled=false;button.classList.remove('loading');}
 }
 
@@ -195,11 +155,14 @@ function setupCalc(){
   $$('#calc-format,#target-mode,#weather-select,#terrain-select,#atk-grounded,#def-grounded,#mod-reflect,#mod-light-screen,#mod-aurora-veil,#mod-burn,#mod-critical,#mod-helping-hand,#mod-friend-guard').forEach(control=>control.addEventListener('change',syncBattleState));$$('.reset-side[data-side]').forEach(button=>button.addEventListener('click',()=>resetPoints(button.dataset.side)));$('#reset-battle').addEventListener('click',resetBattle);document.addEventListener('pointerdown',event=>{['attacker','defender'].forEach(side=>{if(pickerState[side].open&&!$(`#${sidePrefix(side)}-picker`).contains(event.target))closePicker(side);});});renderStats('attacker');renderStats('defender');
 }
 
-$$('.nav-btn').forEach(b=>b.onclick=()=>navTo(b.dataset.view));$('#usage-search').addEventListener('input',e=>renderRanking(e.target.value));$('#format-select').addEventListener('change',()=>applyStore(store,{fromCache:true}));$('#refresh-data').addEventListener('click',()=>updateData());setupTypes();setupCalc();const initial=location.hash.slice(1);if(['usage','types','calc'].includes(initial))navTo(initial);
-let cached=null;try{cached=JSON.parse(localStorage.getItem(CACHE_KEY));}catch{}if(cached?.catalog?.length)applyStore(cached,{fromCache:true});updateData({silent:!!cached});
+async function initializeApp(){
+  const response=await fetch('/api/bootstrap',{headers:{'Accept':'application/json'}});if(!response.ok)throw new Error(`数据服务 HTTP ${response.status}`);const payload=await response.json();hydrateStatic(payload.static);chineseAliases={...(payload.aliases||{})};calcState=createCalcState();
+  $$('.nav-btn').forEach(b=>b.onclick=()=>navTo(b.dataset.view));$('#usage-search').addEventListener('input',e=>renderRanking(e.target.value));$('#format-select').addEventListener('change',()=>applyStore(store,{fromCache:true}));$('#refresh-data').addEventListener('click',()=>updateData());setupTypes();setupCalc();const initial=location.hash.slice(1);if(['usage','types','calc'].includes(initial))navTo(initial);if(payload.meta)applyStore(payload,{fromCache:true});else setStatus('SQLite 已初始化，但尚无赛季数据。请点击“更新赛季数据”。','warn');setupModelTools();
+}
+initializeApp().catch(error=>{console.error(error);setStatus(`无法读取本地数据库：${error.message}`,'error');});
 
-if(document.modelContext?.registerTool){
+function setupModelTools(){if(document.modelContext?.registerTool){
   document.modelContext.registerTool({name:'find_pokemon_meta',description:'Find a Pokémon in the currently loaded Pokémon Champions Battle Data ranking and return its rank and common configuration.',inputSchema:{type:'object',properties:{name:{type:'string',description:'Chinese or English Pokémon name, including a partial name'}},required:['name']},annotations:{readOnlyHint:true,untrustedContentHint:false},execute:({name})=>{const q=String(name).toLowerCase(),format=$('#format-select').value,i=ranking.findIndex(m=>m.name.toLowerCase().includes(q)||m.displayName.includes(name));if(i<0)return `当前 ${format} TOP 50 中没有找到“${name}”。`;const m=ranking[i],b=m.battles[format],top=b.top||{};navTo('usage');renderRanking(m.displayName);selectConfig(i);return `${m.displayName}：${format==='Doubles'?'双打':'单打'}使用排名第 ${b.position}，常用道具 ${zhItem(top.held_item?.name)}${pct(top.held_item)}，常用招式 ${zhMove(top.move?.name)}${pct(top.move)}，性格 ${zhNature(top.stat_alignment?.name)}${pct(top.stat_alignment)}。数据赛季 ${store.meta.season}。`;}}).catch(()=>{});
   document.modelContext.registerTool({name:'refresh_champions_data',description:'Refresh Pokémon Champions season data from the configured third-party Battle Data mirror.',inputSchema:{type:'object',properties:{}},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:async()=>{await updateData();return $('#update-status').textContent;}}).catch(()=>{});
   document.modelContext.registerTool({name:'check_type_matchup',description:'Calculate one attacking type against a one- or two-type defender.',inputSchema:{type:'object',properties:{attackType:{type:'string',enum:TYPES},defenseType1:{type:'string',enum:TYPES},defenseType2:{type:'string',enum:['',...TYPES]}},required:['attackType','defenseType1']},annotations:{readOnlyHint:true,untrustedContentHint:false},execute:({attackType,defenseType1,defenseType2=''})=>{const value=[defenseType1,defenseType2].filter(Boolean).reduce((n,d)=>n*mult(attackType,d),1);return `${attackType}属性攻击 ${defenseType1}${defenseType2?'／'+defenseType2:''} 属性防守方时为 ${value} 倍。`;}}).catch(()=>{});
-}
+}}

@@ -1,0 +1,16 @@
+services:
+  champions:
+    build:
+      context: .
+    container_name: champions-local
+    ports:
+      - "4173:8000"
+    environment:
+      DATABASE_PATH: /data/champions.sqlite3
+      AUTO_REFRESH: "1"
+    volumes:
+      - champions_data:/data
+    restart: unless-stopped
+
+volumes:
+  champions_data:
