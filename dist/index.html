@@ -6,8 +6,8 @@
   <meta name="description" content="宝可梦冠军环境数据、属性克制与伤害计算工具。" />
   <title>冠军终端 · Pokémon Champions 工具</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230a1020' stroke='%237ce7ff' stroke-width='2'/%3E%3Cpath d='M3 16h26M7 12a10 10 0 0118 0' stroke='%23ffce4a' stroke-width='3' fill='none'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23f5f7ff' stroke='%237ce7ff' stroke-width='2'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="./styles.css?v=5" />
-  <link rel="stylesheet" href="./updates.css?v=5" />
+  <link rel="stylesheet" href="./styles.css?v=6" />
+  <link rel="stylesheet" href="./updates.css?v=6" />
 </head>
 <body>
   <div class="noise"></div>
@@ -82,6 +82,14 @@
           <div id="move-info" class="move-info"></div>
         </section>
 
+        <section class="combatant defender panel" aria-labelledby="defender-title">
+          <div class="combatant-head"><span class="side-tag">DEF</span><h2 id="defender-title">防守方</h2><button class="reset-side" data-side="defender">重置能力点</button></div>
+          <div class="field pokemon-field"><span>宝可梦</span><div class="pokemon-picker" id="def-picker"><button class="picker-trigger" id="def-picker-trigger" type="button" aria-haspopup="listbox" aria-expanded="false"></button><div class="picker-popover" id="def-picker-popover" hidden><label class="picker-search"><span>⌕</span><input id="def-pokemon-search" type="search" autocomplete="off" placeholder="输入中文、英文或形态名" aria-controls="def-pokemon-list"></label><div class="picker-list" id="def-pokemon-list" role="listbox" aria-label="防守方宝可梦"></div></div></div><input id="def-pokemon" type="hidden" value="1"></div>
+          <div class="two-col"><label class="field"><span>性格</span><select id="def-nature"></select></label><label class="field"><span>携带道具</span><select id="def-item"></select></label></div>
+          <div class="stats-head"><span>六维能力点</span><strong id="def-points-total">0 / 66</strong></div>
+          <div class="stats-editor" id="def-stats"></div>
+        </section>
+
         <section class="damage-core panel" aria-live="polite">
           <div class="vs">VS</div>
           <p class="eyebrow">预计伤害</p>
@@ -91,14 +99,6 @@
           <div id="ko-chip" class="ko-chip">—</div>
           <dl id="calc-factors" class="calc-factors"></dl>
           <p class="formula-note">使用 Champions 50 级基础数值与 0–32 能力点。仅显示当前生效的伤害修正；本轮不计算特性和能力等级。</p>
-        </section>
-
-        <section class="combatant defender panel" aria-labelledby="defender-title">
-          <div class="combatant-head"><span class="side-tag">DEF</span><h2 id="defender-title">防守方</h2><button class="reset-side" data-side="defender">重置能力点</button></div>
-          <div class="field pokemon-field"><span>宝可梦</span><div class="pokemon-picker" id="def-picker"><button class="picker-trigger" id="def-picker-trigger" type="button" aria-haspopup="listbox" aria-expanded="false"></button><div class="picker-popover" id="def-picker-popover" hidden><label class="picker-search"><span>⌕</span><input id="def-pokemon-search" type="search" autocomplete="off" placeholder="输入中文、英文或形态名" aria-controls="def-pokemon-list"></label><div class="picker-list" id="def-pokemon-list" role="listbox" aria-label="防守方宝可梦"></div></div></div><input id="def-pokemon" type="hidden" value="1"></div>
-          <div class="two-col"><label class="field"><span>性格</span><select id="def-nature"></select></label><label class="field"><span>携带道具</span><select id="def-item"></select></label></div>
-          <div class="stats-head"><span>六维能力点</span><strong id="def-points-total">0 / 66</strong></div>
-          <div class="stats-editor" id="def-stats"></div>
         </section>
       </div>
 
@@ -112,7 +112,7 @@
       </section>
     </section>
   </main>
-  <footer><span>冠军终端 v0.5 · SQLite</span><p>非官方粉丝工具。数据来自 <a href="https://championsbattledata.com/api_guide" target="_blank" rel="noreferrer">Champions Battle Data</a>；Pokémon 及相关名称归其权利人所有。</p><span id="footer-snapshot">尚未载入数据</span></footer>
-  <script src="./app.js?v=5"></script>
+  <footer><span>冠军终端 v0.6 · SQLite</span><p>非官方粉丝工具。数据来自 <a href="https://championsbattledata.com/api_guide" target="_blank" rel="noreferrer">Champions Battle Data</a>；Pokémon 及相关名称归其权利人所有。</p><span id="footer-snapshot">尚未载入数据</span></footer>
+  <script src="./app.js?v=6"></script>
 </body>
 </html>
