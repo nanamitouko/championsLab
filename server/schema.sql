@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS season_items (
   PRIMARY KEY (season_id, item_name)
 );
 
+CREATE TABLE IF NOT EXISTS season_moves (
+  season_id INTEGER NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  type_zh TEXT NOT NULL REFERENCES types(name_zh),
+  category TEXT NOT NULL,
+  power INTEGER,
+  PRIMARY KEY (season_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS source_snapshots (
   season_id INTEGER PRIMARY KEY REFERENCES seasons(id) ON DELETE CASCADE,
   payload_json TEXT NOT NULL
@@ -119,5 +128,6 @@ CREATE TABLE IF NOT EXISTS sprite_assets (
 
 CREATE INDEX IF NOT EXISTS idx_species_season ON pokemon_species(season_id);
 CREATE INDEX IF NOT EXISTS idx_forms_season ON pokemon_forms(season_id);
+CREATE INDEX IF NOT EXISTS idx_moves_season ON season_moves(season_id);
 CREATE INDEX IF NOT EXISTS idx_sprite_assets_season ON sprite_assets(season_id);
-PRAGMA user_version = 2;
+PRAGMA user_version = 4;

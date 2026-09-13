@@ -11,6 +11,7 @@ os.environ["SPRITE_DIR"] = str(Path(MODULE_TEMP.name) / "sprites")
 
 import app as app_module
 import db
+import importer
 
 
 def fixture_store():
@@ -56,6 +57,9 @@ class DatabaseTests(unittest.TestCase):
         payload = db.load_bootstrap()
         self.assertEqual(18, len(payload["static"]["types"]))
         self.assertEqual(["hp", "atk", "def", "spa", "spd", "spe"], payload["static"]["statKeys"])
+        self.assertEqual("水波刀", payload["static"]["moveZh"]["Aqua Cutter"])
+        self.assertEqual("雷丘进化石X", payload["static"]["itemZh"]["Raichunite X"])
+        self.assertEqual("尾甲", payload["static"]["abilityZh"]["Armor Tail"])
         self.assertNotIn("catalog", payload)
         self.assertIsNone(payload["meta"])
 
@@ -73,6 +77,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(usage["catalog"][0]["sprite"].startswith("/api/sprites/"))
         self.assertEqual(["Earthquake"], calculator["calculator"][0]["learnableMoves"])
         self.assertNotIn("aliases", calculator)
+        self.assertEqual(1, bootstrap["meta"]["translationCoverage"]["missingTotal"])
+        self.assertEqual(1, bootstrap["meta"]["translationCoverage"]["ability"]["missing"])
 
     def test_usage_rejects_unknown_format(self):
         with self.assertRaises(ValueError):
@@ -95,7 +101,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(1, len(calculator.get_json()["calculator"]))
         with patch.object(app_module, "refresh", return_value=self.store["meta"]), patch.object(app_module, "schedule_warmup"):
             refreshed = client.post("/api/refresh")
-        expected_meta = {**self.store["meta"], "rosterCount": 1}
+        expected_meta = db.load_bootstrap()["meta"]
         self.assertEqual({"meta": expected_meta}, refreshed.get_json())
         self.assertEqual("no-store", refreshed.headers["Cache-Control"])
 
@@ -105,6 +111,66 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual("image/svg+xml", response.mimetype)
         self.assertEqual("no-store", response.headers["Cache-Control"])
+
+    def test_refresh_prunes_stale_sprite_mappings(self):
+        self.save_fixture()
+        with db.database() as connection:
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM sprite_assets").fetchone()[0])
+        self.store["catalog"][0]["sprite"] = ""
+        self.store["calculator"][0]["sprite"] = ""
+        db.save_snapshot(self.store, {"fixture": True})
+        with db.database() as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM sprite_assets").fetchone()[0])
+
+    def test_existing_snapshot_uses_new_pokemon_translation_without_reimport(self):
+        self.store["catalog"][0].update(name="Aegislash", displayName="Aegislash")
+        self.store["calculator"][0].update(name="Aegislash [Blade Forme]", baseName="Aegislash Shield Forme", displayName="Aegislash [Blade Forme]", baseDisplayName="Aegislash Shield Forme")
+        db.save_snapshot(self.store, {"fixture": True})
+        self.assertEqual("坚盾剑怪", db.load_usage("Doubles")["catalog"][0]["displayName"])
+        calculator = db.load_calculator()["calculator"][0]
+        self.assertEqual("坚盾剑怪（刀剑形态）", calculator["displayName"])
+        self.assertEqual("坚盾剑怪（盾牌形态）", calculator["baseDisplayName"])
+
+    def test_season_move_pool_keeps_all_attacks_and_excludes_status_moves(self):
+        self.store["calculator"][0]["learnableMoves"] = ["Earthquake", "Iron Head", "Grass Knot", "Protect"]
+        self.store["moves"] = [
+            {"name": "Earthquake", "type": "地面", "category": "物理", "power": 100},
+            {"name": "Iron Head", "type": "钢", "category": "物理", "power": 80},
+            {"name": "Grass Knot", "type": "草", "category": "特殊", "power": None},
+            {"name": "Protect", "type": "一般", "category": "变化", "power": None},
+        ]
+        self.save_fixture()
+        bootstrap = db.load_bootstrap()
+        moves = {move["name"]: move for move in bootstrap["static"]["moves"]}
+        self.assertEqual({"Earthquake", "Iron Head", "Grass Knot"}, set(moves))
+        self.assertIsNone(moves["Grass Knot"]["power"])
+        self.assertEqual(
+            {"complete": True, "learnable": 4, "metadata": 4, "missing": 0, "attacking": 3, "formulaReady": 2, "conditional": 1},
+            bootstrap["meta"]["movePoolCoverage"],
+        )
+
+    def test_move_catalog_matches_champions_names_and_smart_apostrophes(self):
+        calculator = [{"learnableMoves": ["Iron Head", "Kowtow Cleave", "King's Shield"]}]
+        rows = [
+            {"name": "Iron Head", "type": "Steel", "category": "Physical", "power": 80},
+            {"name": "Kowtow Cleave", "type": "Dark", "category": "Physical", "power": 85},
+            {"name": "King’s Shield", "type": "Steel", "category": "Status", "power": None},
+        ]
+        catalog = importer.build_move_catalog(calculator, rows, {"typeZh": {"Steel": "钢", "Dark": "恶"}})
+        self.assertEqual(["Iron Head", "King's Shield", "Kowtow Cleave"], [move["name"] for move in catalog])
+        self.assertEqual(80, next(move["power"] for move in catalog if move["name"] == "Iron Head"))
+        self.assertEqual(85, next(move["power"] for move in catalog if move["name"] == "Kowtow Cleave"))
+
+    def test_unknown_item_placeholders_are_not_imported(self):
+        self.assertTrue(importer.valid_item_name("Life Orb"))
+        self.assertFalse(importer.valid_item_name("Unknown Item 152"))
+        battle = importer.compact_battle({
+            "position": 1,
+            "top": {"held_item": {"name": "Unknown Item 152"}},
+            "values": {"held_item": ["Unknown Item 152", "Life Orb"]},
+        })
+        self.assertIsNone(battle["top"]["held_item"])
+        self.assertEqual(["Life Orb"], battle["values"]["held_item"])
 
 
 if __name__ == "__main__":
