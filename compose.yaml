@@ -9,6 +9,7 @@ services:
       DATABASE_PATH: /data/champions.sqlite3
       SPRITE_DIR: /data/sprites
       AUTO_REFRESH: "1"
+      POKECHAM_BASE_URL: https://pokechamdb.com
     volumes:
       - champions_data:/data
     restart: unless-stopped

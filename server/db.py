@@ -13,6 +13,7 @@ SCHEMA_PATH = BASE_DIR / "schema.sql"
 SEED_PATH = BASE_DIR / "seed.json"
 TRANSLATION_SNAPSHOT_PATH = BASE_DIR / "translations.zh-CN.json"
 TRANSLATION_OVERRIDES_PATH = BASE_DIR / "translation_overrides.zh-CN.json"
+POKECHAM_OVERRIDES_PATH = BASE_DIR / "pokecham_overrides.json"
 
 
 def connect():
@@ -88,9 +89,11 @@ def _read_json(path):
 def bundled_translation_groups():
     snapshot = _read_json(TRANSLATION_SNAPSHOT_PATH)
     overrides = _read_json(TRANSLATION_OVERRIDES_PATH)
+    pokecham_overrides = _read_json(POKECHAM_OVERRIDES_PATH)
     groups = {kind: dict(values) for kind, values in snapshot.items()}
-    for kind, values in overrides.items():
-        groups.setdefault(kind, {}).update(values)
+    for source in (overrides, pokecham_overrides):
+        for kind, values in source.items():
+            groups.setdefault(kind, {}).update(values)
     return groups
 
 
@@ -479,6 +482,43 @@ def load_calculator():
         }
 
 
+def load_refresh_base():
+    """Load the complete active snapshot for a source adapter to update transactionally."""
+    with database() as connection:
+        season = _active_season(connection)
+        if not season:
+            return None
+        sid = season["id"]
+        catalog = []
+        for row in connection.execute("SELECT * FROM pokemon_species WHERE season_id=? ORDER BY id", (sid,)):
+            catalog.append({
+                "slug": row["slug"], "name": row["name"], "displayName": row["display_name"],
+                "sprite": row["sprite"], "types": json.loads(row["types_json"]),
+                "stats": json.loads(row["stats_json"]), "battles": json.loads(row["battles_json"]),
+            })
+        calculator = []
+        for row in connection.execute("SELECT * FROM pokemon_forms WHERE season_id=? ORDER BY id", (sid,)):
+            calculator.append({
+                "slug": row["slug"], "name": row["name"], "baseName": row["base_name"],
+                "displayName": row["display_name"], "baseDisplayName": row["base_display_name"],
+                "searchText": row["search_text"], "sprite": row["sprite"],
+                "types": json.loads(row["types_json"]), "stats": json.loads(row["stats_json"]),
+                "learnableMoves": json.loads(row["learnable_moves_json"]),
+            })
+        return {
+            "meta": {
+                "season": season["code"], "generatedAt": season["generated_at"],
+                "dataVersion": season["data_version"], "source": season["source"],
+            },
+            "catalog": catalog,
+            "calculator": calculator,
+            "items": [row["item_name"] for row in connection.execute(
+                "SELECT item_name FROM season_items WHERE season_id=? ORDER BY item_name", (sid,)
+            )],
+            "moves": _season_moves(connection, sid),
+        }
+
+
 def replace_api_aliases(aliases):
     with database() as connection:
         connection.execute("DELETE FROM translations WHERE kind='pokemon_api'")
@@ -498,6 +538,7 @@ def health_info():
         return {
             "database": str(DB_PATH), "season": season["code"] if season else None,
             "dataVersion": season["data_version"] if season else None,
+            "source": season["source"] if season else None,
             "species": connection.execute("SELECT COUNT(*) FROM pokemon_species").fetchone()[0],
             "forms": connection.execute("SELECT COUNT(*) FROM pokemon_forms").fetchone()[0],
             "sprites": {"cached": sprite_counts["cached"] or 0, "total": sprite_counts["total"]},

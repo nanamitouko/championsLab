@@ -172,6 +172,58 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(battle["top"]["held_item"])
         self.assertEqual(["Life Orb"], battle["values"]["held_item"])
 
+    def test_pokecham_season_and_localized_battle_adapter(self):
+        home = r'latestSeasonByFormat\":{\"single\":\"M-6\",\"double\":\"M-6\"}'
+        self.assertEqual("M-6", importer._pokecham_season(home))
+        html = """
+        <span>MOVES</span><span>Moves</span><ul>
+          <li><span class="min-w-0 flex-1 truncate text-xs">Weather Ball</span></li>
+        </ul>
+        <span>ITEMS</span><span>Items</span><ul>
+          <li><span class="min-w-0 flex-1 truncate text-xs">Life Orb</span></li>
+        </ul>
+        <span>ABILITY</span><ul>
+          <li><span class="min-w-0 flex-1 truncate text-xs">Forecast</span></li>
+        </ul>
+        <span>NATURE</span><ul>
+          <li><span class="min-w-0 flex-1 truncate text-xs">Modest</span></li>
+        </ul>
+        <span>PARTNER</span>
+        """
+        snapshot = {
+            "pokemonSlug": "castform", "rank": 7,
+            "moves": [{"name": "ウェザーボール", "percentage": 88.5}],
+            "items": [{"name": "いのちのたま", "percentage": 50}],
+            "abilities": [{"name": "てんきや", "percentage": 100}],
+            "natures": [{"name": "ひかえめ", "percentage": 41.2}],
+            "evs": [{"percentage": 35, "hp": 2, "atk": 0, "def": 0, "spAtk": 32, "spDef": 0, "speed": 32}],
+        }
+        payload = {"slug": "castform", "variants": {"M-6:single": snapshot}}
+        name_maps = importer._pokecham_name_maps(payload, html, "M-6")
+        battle = importer._pokecham_battle(snapshot, name_maps)
+        self.assertEqual("Weather Ball", battle["top"]["move"]["name"])
+        self.assertEqual("88.5%", battle["top"]["move"]["percentage"])
+        self.assertEqual("Life Orb", battle["top"]["held_item"]["name"])
+        self.assertEqual("Modest", battle["top"]["stat_alignment"]["name"])
+        self.assertEqual(32, battle["top"]["stat_points"]["sp_atk_points"])
+
+    def test_pokecham_slug_aliases_cover_ranked_forms(self):
+        available = {
+            "aegislash-shield-forme", "basculegion-male", "floette-form-5",
+            "alolan-ninetales", "hisuian-arcanine",
+        }
+        self.assertEqual("aegislash-shield-forme", importer._pokecham_catalog_slug("aegislash", available))
+        self.assertEqual("basculegion-male", importer._pokecham_catalog_slug("basculegion", available))
+        self.assertEqual("floette-form-5", importer._pokecham_catalog_slug("floette-eternal", available))
+        self.assertEqual("alolan-ninetales", importer._pokecham_catalog_slug("ninetales-alola", available))
+        self.assertEqual("hisuian-arcanine", importer._pokecham_catalog_slug("arcanine-hisui", available))
+
+    def test_refresh_switches_to_pokecham_after_primary_failure(self):
+        expected = {"season": "M-6", "source": "PokéChamp DB（备用镜像）"}
+        with patch.object(importer, "refresh_from_battle_data", side_effect=TimeoutError("timeout")), \
+             patch.object(importer, "refresh_from_pokecham", return_value=expected):
+            self.assertEqual(expected, importer.refresh())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,7 +25,9 @@ SQLite 文件位于容器的 `/data/champions.sqlite3`，宝可梦图标缓存�
 - `GET /api/usage?format=Doubles`：指定对战形式的前 50 名榜单。
 - `GET /api/calculator`：伤害计算器所需的形态、道具和招式数据。
 - `GET /api/sprites/<cache-key>`：服务器本地缓存的宝可梦图标。
-- `POST /api/refresh`：从 Battle Data 和 PokéAPI 抓取并事务更新 SQLite，仅返回新赛季元数据。
+- `POST /api/refresh`：优先从 Battle Data 更新；连接失败时自动使用 PokéChamp DB 备用镜像，并事务更新 SQLite，仅返回新赛季元数据。
+
+备用镜像会沿用 SQLite 中已经验证过的完整图鉴、数值和技能池，只替换当前赛季的单打/双打排名与常用配置。这样备用源异常或出现无法映射的新宝可梦时不会写入不完整数据；首次建立空数据库仍需至少成功完成一次 Battle Data 全量更新。
 
 可学招式名单以 Champions Battle Data 为准；招式属性、分类与威力由 Pokemon Champions Data 数据集补齐并在更新赛季时写入 SQLite。固定威力攻击可直接计算，体重、速度、剩余 HP、一击必杀等条件型招式会保留在选择列表中并明确标记为需要专用参数。
 
