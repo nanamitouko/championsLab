@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ os.environ["SPRITE_DIR"] = str(Path(MODULE_TEMP.name) / "sprites")
 import app as app_module
 import db
 import importer
+import stat_model
 
 
 def fixture_store():
@@ -34,8 +36,8 @@ def fixture_store():
     }
     return {
         "meta": {"season":"TEST", "generatedAt":"2026-09-12T00:00:00Z", "dataVersion":"test-v1", "source":"fixture"},
-        "catalog": [{"slug":"garchomp","name":"Garchomp","displayName":"烈咬陆鲨","sprite":sprite,"types":["龙","地面"],"stats":{"hp":108,"atk":130,"def":95,"spa":80,"spd":85,"spe":102},"battles":{"Doubles":battle,"Singles":None}}],
-        "calculator": [{"slug":"garchomp","name":"Garchomp","baseName":"Garchomp","displayName":"烈咬陆鲨","baseDisplayName":"烈咬陆鲨","searchText":"garchomp 烈咬陆鲨","sprite":sprite,"types":["龙","地面"],"stats":{"hp":108,"atk":130,"def":95,"spa":80,"spd":85,"spe":102},"learnableMoves":["Earthquake"]}],
+        "catalog": [{"slug":"garchomp","name":"Garchomp","displayName":"烈咬陆鲨","sprite":sprite,"types":["龙","地面"],"baseStats":{"hp":108,"atk":130,"def":95,"spa":80,"spd":85,"spe":102},"stats":{"hp":183,"atk":150,"def":115,"spa":100,"spd":105,"spe":122},"battles":{"Doubles":battle,"Singles":None}}],
+        "calculator": [{"slug":"garchomp","name":"Garchomp","baseName":"Garchomp","displayName":"烈咬陆鲨","baseDisplayName":"烈咬陆鲨","searchText":"garchomp 烈咬陆鲨","sprite":sprite,"types":["龙","地面"],"baseStats":{"hp":108,"atk":130,"def":95,"spa":80,"spd":85,"spe":102},"stats":{"hp":183,"atk":150,"def":115,"spa":100,"spd":105,"spe":122},"abilities":["Rough Skin","Sand Veil"],"learnableMoves":["Earthquake"]}],
         "items": ["No Item", "Life Orb"],
     }
 
@@ -76,9 +78,124 @@ class DatabaseTests(unittest.TestCase):
         self.assertNotIn("stats", usage["catalog"][0])
         self.assertTrue(usage["catalog"][0]["sprite"].startswith("/api/sprites/"))
         self.assertEqual(["Earthquake"], calculator["calculator"][0]["learnableMoves"])
+        self.assertEqual(130, calculator["calculator"][0]["baseStats"]["atk"])
+        self.assertEqual(150, calculator["calculator"][0]["stats"]["atk"])
+        self.assertTrue(bootstrap["meta"]["statCoverage"]["complete"])
         self.assertNotIn("aliases", calculator)
         self.assertEqual(1, bootstrap["meta"]["translationCoverage"]["missingTotal"])
         self.assertEqual(1, bootstrap["meta"]["translationCoverage"]["ability"]["missing"])
+
+    def test_reference_lists_search_only_names_and_return_chinese(self):
+        self.store["moves"] = [
+            {"name": "Earthquake", "type": "地面", "category": "物理", "power": 100},
+        ]
+        self.save_fixture()
+        pokemon = db.load_reference("pokemon", "garch")
+        self.assertEqual(1, pokemon["total"])
+        self.assertEqual("烈咬陆鲨", pokemon["items"][0]["name"])
+        self.assertEqual(1, db.load_reference("pokemon", "烈咬")["total"])
+        self.assertEqual(0, db.load_reference("pokemon", "龙")["total"])
+        items = db.load_reference("item", "life orb")
+        self.assertEqual(["生命宝珠"], [entry["name"] for entry in items["items"]])
+        self.assertEqual(0, db.load_reference("item", "提升招式")["total"])
+        abilities = db.load_reference("ability", "rough skin")
+        self.assertEqual(["粗糙皮肤"], [entry["name"] for entry in abilities["items"]])
+
+    def test_reference_details_include_moves_stats_descriptions_and_relations(self):
+        self.store["moves"] = [
+            {"name": "Earthquake", "type": "地面", "category": "物理", "power": 100},
+        ]
+        self.save_fixture()
+        pokemon = db.load_reference_detail("pokemon", "garchomp")["detail"]
+        self.assertEqual(130, pokemon["baseStats"]["atk"])
+        self.assertEqual(150, pokemon["stats"]["atk"])
+        self.assertEqual("地震", pokemon["moves"][0]["name"])
+        self.assertEqual({"粗糙皮肤", "沙隐"}, {entry["name"] for entry in pokemon["abilities"]})
+        item = db.load_reference_detail("item", "life-orb")["detail"]
+        self.assertTrue(item["descriptionZh"])
+        self.assertEqual("garchomp", item["pokemon"][0]["slug"])
+        self.assertEqual(1, item["pokemon"][0]["rank"])
+        ability = db.load_reference_detail("ability", "rough-skin")["detail"]
+        self.assertTrue(ability["descriptionZh"])
+        self.assertEqual("garchomp", ability["pokemon"][0]["slug"])
+
+    def test_reference_http_contract_errors_etag_and_pagination(self):
+        self.save_fixture()
+        client = app_module.app.test_client()
+        first = client.get("/api/reference?kind=pokemon&limit=1", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(200, first.status_code)
+        self.assertEqual(1, first.get_json()["total"])
+        self.assertIn("max-age=300", first.headers["Cache-Control"])
+        second = client.get("/api/reference?kind=pokemon&limit=1", headers={"If-None-Match": first.headers["ETag"]})
+        self.assertEqual(304, second.status_code)
+        self.assertEqual(400, client.get("/api/reference?kind=move").status_code)
+        self.assertEqual(400, client.get("/api/reference?limit=nope").status_code)
+        self.assertEqual(404, client.get("/api/reference/pokemon/missing").status_code)
+        detail = client.get("/api/reference/ability/rough-skin")
+        self.assertEqual("粗糙皮肤", detail.get_json()["detail"]["name"])
+
+    def test_v4_database_is_migrated_without_deleting_data(self):
+        legacy = Path(self.temp_dir.name) / "legacy.sqlite3"
+        connection = __import__("sqlite3").connect(legacy)
+        connection.executescript("""
+          CREATE TABLE items(name TEXT PRIMARY KEY,name_zh TEXT NOT NULL,implemented INTEGER NOT NULL DEFAULT 1);
+          INSERT INTO items VALUES('Life Orb','生命宝珠',1);
+          CREATE TABLE pokemon_forms(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,season_id INTEGER NOT NULL,slug TEXT NOT NULL,
+            name TEXT NOT NULL,base_name TEXT NOT NULL,display_name TEXT NOT NULL,
+            base_display_name TEXT NOT NULL,search_text TEXT NOT NULL,sprite TEXT,
+            types_json TEXT NOT NULL,stats_json TEXT NOT NULL,learnable_moves_json TEXT NOT NULL,
+            UNIQUE(season_id,slug)
+          );
+        """)
+        connection.close()
+        db.DB_PATH = legacy
+        db.init_database()
+        with db.database() as migrated:
+            item_columns = {row["name"] for row in migrated.execute("PRAGMA table_info(items)")}
+            form_columns = {row["name"] for row in migrated.execute("PRAGMA table_info(pokemon_forms)")}
+            self.assertTrue({"slug", "description_zh"}.issubset(item_columns))
+            self.assertTrue({"abilities_json", "base_stats_json"}.issubset(form_columns))
+            self.assertEqual("生命宝珠", migrated.execute("SELECT name_zh FROM items WHERE name='Life Orb'").fetchone()[0])
+
+    def test_champions_stat_model_round_trip_and_golisopod_values(self):
+        base = {"hp":75, "atk":125, "def":140, "spa":60, "spd":90, "spe":40}
+        level_50 = {"hp":150, "atk":145, "def":160, "spa":80, "spd":110, "spe":60}
+        self.assertEqual(level_50, stat_model.level_50_neutral_from_base(base))
+        self.assertEqual(base, stat_model.base_from_level_50_neutral(level_50))
+        self.assertTrue(stat_model.audit_stat_pair(base, level_50))
+        self.assertFalse(stat_model.audit_stat_pair(base, {**level_50, "def": 159}))
+
+    def test_stat_model_rejects_malformed_source_values(self):
+        with self.assertRaises(ValueError):
+            stat_model.source_level_50_stats({"hp": 150})
+        malformed = {"hp":150, "attack":145.5, "defense":160, "sp_attack":80, "sp_defense":110, "speed":60}
+        with self.assertRaises(ValueError):
+            stat_model.source_level_50_stats(malformed)
+        with self.assertRaises(ValueError):
+            stat_model.base_from_level_50_neutral(
+                {"hp": 10, "atk": 10, "def": 10, "spa": 10, "spd": 10, "spe": 10}
+            )
+
+    def test_existing_season_backfills_reference_implementation_flags(self):
+        self.save_fixture()
+        with db.database() as connection:
+            connection.execute("UPDATE pokemon_forms SET abilities_json='[]'")
+            connection.execute("UPDATE abilities SET implemented=0")
+            connection.execute("UPDATE items SET implemented=0")
+            connection.commit()
+        db.init_database()
+        with db.database() as connection:
+            abilities = json.loads(connection.execute(
+                "SELECT abilities_json FROM pokemon_forms WHERE slug='garchomp'"
+            ).fetchone()[0])
+            self.assertIn("Rough Skin", abilities)
+            self.assertEqual(1, connection.execute(
+                "SELECT implemented FROM abilities WHERE name='Rough Skin'"
+            ).fetchone()[0])
+            self.assertEqual(1, connection.execute(
+                "SELECT implemented FROM items WHERE name='Life Orb'"
+            ).fetchone()[0])
 
     def test_usage_rejects_unknown_format(self):
         with self.assertRaises(ValueError):

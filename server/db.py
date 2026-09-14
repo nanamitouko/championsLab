@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from stat_model import audit_stat_pair, base_from_level_50_neutral
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("DATABASE_PATH", BASE_DIR.parent / "data" / "champions.sqlite3"))
 SCHEMA_PATH = BASE_DIR / "schema.sql"
@@ -14,6 +16,8 @@ SEED_PATH = BASE_DIR / "seed.json"
 TRANSLATION_SNAPSHOT_PATH = BASE_DIR / "translations.zh-CN.json"
 TRANSLATION_OVERRIDES_PATH = BASE_DIR / "translation_overrides.zh-CN.json"
 POKECHAM_OVERRIDES_PATH = BASE_DIR / "pokecham_overrides.json"
+REFERENCE_DATA_PATH = BASE_DIR / "reference.zh-CN.json"
+REFERENCE_OVERRIDES_PATH = BASE_DIR / "reference_overrides.zh-CN.json"
 
 
 def connect():
@@ -86,6 +90,36 @@ def _read_json(path):
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
+def _entity_slug(name):
+    value = str(name or "").lower().replace("’", "'").replace("♀", "-female").replace("♂", "-male")
+    return re.sub(r"^-|-$", "", re.sub(r"[^a-z0-9]+", "-", value))
+
+
+def _ensure_column(connection, table, column, declaration):
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def migrate_schema(connection):
+    _ensure_column(connection, "items", "slug", "TEXT")
+    _ensure_column(connection, "items", "description_zh", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "pokemon_forms", "abilities_json", "TEXT NOT NULL DEFAULT '[]'")
+    for table in ("pokemon_species", "pokemon_forms"):
+        _ensure_column(connection, table, "base_stats_json", "TEXT")
+        for row in connection.execute(
+            f"SELECT id,stats_json FROM {table} WHERE base_stats_json IS NULL OR base_stats_json=''"
+        ):
+            try:
+                base_stats = base_from_level_50_neutral(json.loads(row["stats_json"]))
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            connection.execute(
+                f"UPDATE {table} SET base_stats_json=? WHERE id=?", (_json(base_stats), row["id"])
+            )
+    connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_items_slug_unique ON items(slug)")
+
+
 def bundled_translation_groups():
     snapshot = _read_json(TRANSLATION_SNAPSHOT_PATH)
     overrides = _read_json(TRANSLATION_OVERRIDES_PATH)
@@ -143,11 +177,43 @@ def seed_static(connection):
                  type_zh=excluded.type_zh,category=excluded.category,power=excluded.power""",
             (move["name"], effective["move"].get(move["name"], move["name"]), move["type"], move["category"], move["power"]),
         )
+    reference = _read_json(REFERENCE_DATA_PATH)
+    descriptions = reference.get("descriptions") or {}
+    reference_overrides = _read_json(REFERENCE_OVERRIDES_PATH)
+    descriptions = {
+        kind: {**(descriptions.get(kind) or {}), **(reference_overrides.get(kind) or {})}
+        for kind in ("item", "ability")
+    }
+    canonical_items = {_entity_slug(name): name for name in seed["IMPLEMENTED_ITEMS"]}
+    for item, description in (descriptions.get("item") or {}).items():
+        source_item = item
+        item = canonical_items.get(_entity_slug(item), item)
+        if item != source_item or connection.execute(
+            "SELECT 1 FROM items WHERE slug=? AND name<>?", (_entity_slug(item), item)
+        ).fetchone():
+            connection.execute("DELETE FROM items WHERE slug=? AND name<>?", (_entity_slug(item), item))
+        connection.execute(
+            """INSERT INTO items(name,slug,name_zh,description_zh,implemented) VALUES(?,?,?,?,0)
+               ON CONFLICT(name) DO UPDATE SET slug=excluded.slug,
+                 name_zh=excluded.name_zh,description_zh=excluded.description_zh""",
+            (item, _entity_slug(item), effective["item"].get(item, item), description),
+        )
     for item in seed["IMPLEMENTED_ITEMS"]:
         connection.execute(
-            """INSERT INTO items(name,name_zh,implemented) VALUES(?,?,1)
-               ON CONFLICT(name) DO UPDATE SET name_zh=excluded.name_zh,implemented=1""",
-            (item, effective["item"].get(item, item)),
+            """INSERT INTO items(name,slug,name_zh,description_zh,implemented) VALUES(?,?,?,?,1)
+               ON CONFLICT(name) DO UPDATE SET slug=excluded.slug,name_zh=excluded.name_zh,
+                 description_zh=CASE WHEN items.description_zh='' THEN excluded.description_zh ELSE items.description_zh END,
+                 implemented=1""",
+            (item, _entity_slug(item), effective["item"].get(item, item),
+             (descriptions.get("item") or {}).get(item, "")),
+        )
+    for ability, description in (descriptions.get("ability") or {}).items():
+        connection.execute("DELETE FROM abilities WHERE slug=? AND name<>?", (_entity_slug(ability), ability))
+        connection.execute(
+            """INSERT INTO abilities(name,slug,name_zh,description_zh,implemented) VALUES(?,?,?,?,0)
+               ON CONFLICT(name) DO UPDATE SET slug=excluded.slug,name_zh=excluded.name_zh,
+                 description_zh=excluded.description_zh""",
+            (ability, _entity_slug(ability), effective["ability"].get(ability, ability), description),
         )
     for nature in seed["NATURES"]:
         connection.execute(
@@ -164,14 +230,42 @@ def seed_static(connection):
                 (side, stat_key, seed["STAT_LABELS"][stat_key], stats[stat_key], sort_order),
             )
     connection.execute(
-        """INSERT INTO app_meta(key,value) VALUES('static_seed_version','3')
+        """INSERT INTO app_meta(key,value) VALUES('static_seed_version','5')
            ON CONFLICT(key) DO UPDATE SET value=excluded.value"""
     )
+
+    form_abilities = reference.get("formAbilities") or {}
+    for slug, abilities in form_abilities.items():
+        connection.execute(
+            """UPDATE pokemon_forms SET abilities_json=?
+               WHERE slug=? AND (abilities_json IS NULL OR abilities_json='[]')""",
+            (_json(abilities), slug),
+        )
+    active = connection.execute("SELECT id FROM seasons WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if active:
+        season_id = active["id"]
+        connection.execute("UPDATE items SET implemented=0")
+        connection.execute(
+            "UPDATE items SET implemented=1 WHERE name IN (SELECT item_name FROM season_items WHERE season_id=?)",
+            (season_id,),
+        )
+        connection.execute("UPDATE abilities SET implemented=0")
+        active_abilities = {
+            name
+            for row in connection.execute(
+                "SELECT abilities_json FROM pokemon_forms WHERE season_id=?", (season_id,)
+            )
+            for name in json.loads(row["abilities_json"] or "[]")
+            if name
+        }
+        for name in active_abilities:
+            connection.execute("UPDATE abilities SET implemented=1 WHERE name=?", (name,))
 
 
 def init_database():
     with database() as connection:
         connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        migrate_schema(connection)
         seed_static(connection)
         for season in connection.execute("SELECT id,code,data_version FROM seasons"):
             urls = {
@@ -237,6 +331,12 @@ def static_data(connection):
     }
 
 
+def _store_base_stats(pokemon):
+    if "baseStats" in pokemon:
+        return pokemon["baseStats"]
+    return base_from_level_50_neutral(pokemon["stats"])
+
+
 def save_snapshot(store, raw_payload, aliases=None, translation_groups=None):
     with database() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -254,15 +354,34 @@ def save_snapshot(store, raw_payload, aliases=None, translation_groups=None):
         for table in ("pokemon_species", "pokemon_forms", "season_items", "season_moves", "source_snapshots"):
             connection.execute(f"DELETE FROM {table} WHERE season_id=?", (season_id,))
         connection.executemany(
-            """INSERT INTO pokemon_species(season_id,slug,name,display_name,sprite,types_json,stats_json,battles_json)
-               VALUES(?,?,?,?,?,?,?,?)""",
-            [(season_id, p["slug"], p["name"], p["displayName"], p.get("sprite"), _json(p["types"]), _json(p["stats"]), _json(p["battles"])) for p in store["catalog"]],
+            """INSERT INTO pokemon_species(season_id,slug,name,display_name,sprite,types_json,base_stats_json,stats_json,battles_json)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            [(season_id, p["slug"], p["name"], p["displayName"], p.get("sprite"), _json(p["types"]), _json(_store_base_stats(p)), _json(p["stats"]), _json(p["battles"])) for p in store["catalog"]],
         )
         connection.executemany(
-            """INSERT INTO pokemon_forms(season_id,slug,name,base_name,display_name,base_display_name,search_text,sprite,types_json,stats_json,learnable_moves_json)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            [(season_id, p["slug"], p["name"], p["baseName"], p["displayName"], p["baseDisplayName"], p["searchText"], p.get("sprite"), _json(p["types"]), _json(p["stats"]), _json(p["learnableMoves"])) for p in store["calculator"]],
+            """INSERT INTO pokemon_forms(season_id,slug,name,base_name,display_name,base_display_name,search_text,sprite,types_json,base_stats_json,stats_json,abilities_json,learnable_moves_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [(season_id, p["slug"], p["name"], p["baseName"], p["displayName"], p["baseDisplayName"], p["searchText"], p.get("sprite"), _json(p["types"]), _json(_store_base_stats(p)), _json(p["stats"]), _json(p.get("abilities", [])), _json(p["learnableMoves"])) for p in store["calculator"]],
         )
+        item_zh = translation_map(connection, "item")
+        ability_zh = translation_map(connection, "ability")
+        connection.execute("UPDATE items SET implemented=0")
+        connection.execute("UPDATE abilities SET implemented=0")
+        for name in store["items"]:
+            connection.execute(
+                """INSERT INTO items(name,slug,name_zh,description_zh,implemented) VALUES(?,?,?,'',1)
+                   ON CONFLICT(name) DO UPDATE SET slug=excluded.slug,name_zh=excluded.name_zh,implemented=1""",
+                (name, _entity_slug(name), item_zh.get(name, name)),
+            )
+        implemented_abilities = {
+            name for pokemon in store["calculator"] for name in pokemon.get("abilities", []) if name
+        }
+        for name in implemented_abilities:
+            connection.execute(
+                """INSERT INTO abilities(name,slug,name_zh,description_zh,implemented) VALUES(?,?,?,'',1)
+                   ON CONFLICT(name) DO UPDATE SET slug=excluded.slug,name_zh=excluded.name_zh,implemented=1""",
+                (name, _entity_slug(name), ability_zh.get(name, name)),
+            )
         connection.executemany("INSERT INTO season_items(season_id,item_name) VALUES(?,?)", [(season_id, name) for name in store["items"]])
         connection.executemany(
             "INSERT INTO season_moves(season_id,name,type_zh,category,power) VALUES(?,?,?,?,?)",
@@ -295,6 +414,8 @@ def _season_translation_names(connection, season_id):
                 names[kind].update(value for value in values.get(source_key, []) if value)
     for row in connection.execute("SELECT learnable_moves_json FROM pokemon_forms WHERE season_id=?", (season_id,)):
         names["move"].update(value for value in json.loads(row["learnable_moves_json"]) if value)
+    for row in connection.execute("SELECT abilities_json FROM pokemon_forms WHERE season_id=?", (season_id,)):
+        names["ability"].update(value for value in json.loads(row["abilities_json"] or "[]") if value)
     names["item"].update(
         row["item_name"]
         for row in connection.execute("SELECT item_name FROM season_items WHERE season_id=?", (season_id,))
@@ -376,6 +497,7 @@ def _season_meta(connection, season):
         "rosterCount": connection.execute(
             "SELECT COUNT(*) FROM pokemon_forms WHERE season_id=?", (season["id"],)
         ).fetchone()[0],
+        "statCoverage": _stat_coverage(connection, season),
         "translationCoverage": _translation_coverage(connection, season),
         "movePoolCoverage": _move_pool_coverage(connection, season),
     }
@@ -385,6 +507,41 @@ def _active_season(connection):
     return connection.execute(
         "SELECT * FROM seasons WHERE is_active=1 ORDER BY id DESC LIMIT 1"
     ).fetchone()
+
+
+def _row_stats(row):
+    level_50 = json.loads(row["stats_json"])
+    raw_base = row["base_stats_json"] if "base_stats_json" in row.keys() else None
+    try:
+        base = json.loads(raw_base) if raw_base else base_from_level_50_neutral(level_50)
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        base = None
+    return base, level_50
+
+
+def _stat_coverage(connection, season):
+    if not season:
+        return {"complete": True, "total": 0, "valid": 0, "invalid": 0, "rankingRowsWithoutMetadata": 0}
+    total = valid = 0
+    for row in connection.execute(
+        "SELECT base_stats_json,stats_json FROM pokemon_forms WHERE season_id=?", (season["id"],)
+    ):
+        total += 1
+        base, level_50 = _row_stats(row)
+        if base is not None and audit_stat_pair(base, level_50):
+            valid += 1
+    ranking_rows_without_metadata = 0
+    for row in connection.execute(
+        "SELECT base_stats_json,stats_json FROM pokemon_species WHERE season_id=?", (season["id"],)
+    ):
+        base, level_50 = _row_stats(row)
+        if base is None or not audit_stat_pair(base, level_50):
+            ranking_rows_without_metadata += 1
+    return {
+        "complete": valid == total, "total": total, "valid": valid,
+        "invalid": total - valid,
+        "rankingRowsWithoutMetadata": ranking_rows_without_metadata,
+    }
 
 
 def _sprite_map(connection, season_id):
@@ -472,7 +629,8 @@ def load_calculator():
         for row in connection.execute("SELECT * FROM pokemon_forms WHERE season_id=? ORDER BY display_name", (sid,)):
             display_name = localize(row["name"], row["display_name"])
             base_display_name = localize(row["base_name"], row["base_display_name"])
-            calculator.append({"name":row["name"],"baseName":row["base_name"],"displayName":display_name,"baseDisplayName":base_display_name,"searchText":" ".join((row["search_text"],display_name,base_display_name)).lower(),"slug":row["slug"],"sprite":sprites.get(row["sprite"], row["sprite"]),"types":json.loads(row["types_json"]),"stats":json.loads(row["stats_json"]),"learnableMoves":json.loads(row["learnable_moves_json"])})
+            base_stats, level_50_stats = _row_stats(row)
+            calculator.append({"name":row["name"],"baseName":row["base_name"],"displayName":display_name,"baseDisplayName":base_display_name,"searchText":" ".join((row["search_text"],display_name,base_display_name)).lower(),"slug":row["slug"],"sprite":sprites.get(row["sprite"], row["sprite"]),"types":json.loads(row["types_json"]),"baseStats":base_stats,"stats":level_50_stats,"abilities":json.loads(row["abilities_json"] or "[]"),"learnableMoves":json.loads(row["learnable_moves_json"])})
         calculator.sort(key=lambda entry: entry["displayName"])
         season_items = [row["item_name"] for row in connection.execute("SELECT item_name FROM season_items WHERE season_id=?", (sid,))]
         season_items.sort(key=lambda name: static["itemZh"].get(name, name))
@@ -480,6 +638,196 @@ def load_calculator():
             "meta": _season_meta(connection, season), "calculator": calculator,
             "items": season_items,
         }
+
+
+REFERENCE_KINDS = {"pokemon", "item", "ability"}
+
+
+def _visible_zh(source_name, translated_name):
+    """Never expose an untranslated internal Battle Data name in reference UI."""
+    translated_name = str(translated_name or "").strip()
+    return translated_name if translated_name and translated_name != source_name else "中文名待补充"
+
+
+def _reference_form_summary(row, sprites, localize):
+    return {
+        "slug": row["slug"],
+        "name": _visible_zh(row["name"], localize(row["name"], row["display_name"])),
+        "sprite": sprites.get(row["sprite"], row["sprite"]),
+        "types": json.loads(row["types_json"]),
+    }
+
+
+def _reference_search_match(query, *names):
+    if not query:
+        return True
+    haystack = " ".join(str(name or "") for name in names).casefold()
+    return query.casefold() in haystack
+
+
+def load_reference(kind, query="", limit=60, offset=0):
+    if kind not in REFERENCE_KINDS:
+        raise ValueError("资料分类必须是 pokemon、item 或 ability")
+    limit = max(1, min(500, int(limit)))
+    offset = max(0, int(offset))
+    query = str(query or "").strip()[:80]
+    with database() as connection:
+        season = _active_season(connection)
+        if not season:
+            return {"meta": None, "kind": kind, "total": 0, "items": []}
+        sid = season["id"]
+        results = []
+        if kind == "pokemon":
+            sprites = _sprite_map(connection, sid)
+            localize = _pokemon_localizer(connection)
+            rows = connection.execute(
+                "SELECT * FROM pokemon_forms WHERE season_id=? ORDER BY display_name,slug", (sid,)
+            )
+            for row in rows:
+                display_name = localize(row["name"], row["display_name"])
+                base_display_name = localize(row["base_name"], row["base_display_name"])
+                if _reference_search_match(
+                    query, row["name"], row["base_name"], row["slug"], row["search_text"],
+                    display_name, base_display_name,
+                ):
+                    results.append(_reference_form_summary(row, sprites, localize))
+        elif kind == "item":
+            rows = connection.execute(
+                """SELECT i.name,i.slug,i.name_zh FROM season_items si
+                   JOIN items i ON i.name=si.item_name
+                   WHERE si.season_id=? ORDER BY i.name_zh,i.name""", (sid,)
+            )
+            for row in rows:
+                if _reference_search_match(query, row["name"], row["name_zh"], row["slug"]):
+                    results.append({"slug": row["slug"], "name": _visible_zh(row["name"], row["name_zh"])})
+        else:
+            rows = connection.execute(
+                "SELECT name,slug,name_zh FROM abilities WHERE implemented=1 ORDER BY name_zh,name"
+            )
+            for row in rows:
+                if _reference_search_match(query, row["name"], row["name_zh"], row["slug"]):
+                    results.append({"slug": row["slug"], "name": _visible_zh(row["name"], row["name_zh"])})
+        total = len(results)
+        return {
+            "meta": _season_meta(connection, season), "kind": kind, "total": total,
+            "items": results[offset:offset + limit],
+        }
+
+
+def _related_species(connection, season_id, source_kind, source_name, sprites, localize):
+    related = []
+    forms = list(connection.execute("SELECT * FROM pokemon_forms WHERE season_id=?", (season_id,)))
+    by_slug = {row["slug"]: row for row in forms}
+    by_name = {}
+    for row in forms:
+        by_name.setdefault(row["name"], row)
+        by_name.setdefault(row["base_name"], row)
+    if source_kind == "ability":
+        for row in forms:
+            if source_name in json.loads(row["abilities_json"] or "[]"):
+                related.append({**_reference_form_summary(row, sprites, localize), "rank": None})
+    else:
+        for species in connection.execute("SELECT * FROM pokemon_species WHERE season_id=?", (season_id,)):
+            best_rank = None
+            used = False
+            for battle in (json.loads(species["battles_json"]) or {}).values():
+                if not battle:
+                    continue
+                held_items = list(((battle.get("values") or {}).get("held_item") or []))
+                top_item = (((battle.get("top") or {}).get("held_item") or {}).get("name"))
+                if top_item:
+                    held_items.append(top_item)
+                if source_name in held_items:
+                    used = True
+                    position = battle.get("position")
+                    if isinstance(position, int):
+                        best_rank = position if best_rank is None else min(best_rank, position)
+            if not used:
+                continue
+            form = by_slug.get(species["slug"]) or by_name.get(species["name"])
+            if form:
+                related.append({**_reference_form_summary(form, sprites, localize), "rank": best_rank})
+    unique = {}
+    for entry in related:
+        unique.setdefault(entry["slug"], entry)
+    return sorted(unique.values(), key=lambda entry: (entry["rank"] is None, entry["rank"] or 9999, entry["name"]))
+
+
+def load_reference_detail(kind, slug):
+    if kind not in REFERENCE_KINDS:
+        raise ValueError("资料分类必须是 pokemon、item 或 ability")
+    slug = str(slug or "").strip()
+    with database() as connection:
+        season = _active_season(connection)
+        if not season:
+            return None
+        sid = season["id"]
+        sprites = _sprite_map(connection, sid)
+        localize = _pokemon_localizer(connection)
+        if kind == "pokemon":
+            row = connection.execute(
+                "SELECT * FROM pokemon_forms WHERE season_id=? AND slug=?", (sid, slug)
+            ).fetchone()
+            if not row:
+                return None
+            move_zh = translation_map(connection, "move")
+            move_names = json.loads(row["learnable_moves_json"] or "[]")
+            move_rows = {
+                move["name"]: move for move in connection.execute(
+                    "SELECT name,type_zh,category,power FROM season_moves WHERE season_id=?", (sid,)
+                )
+            }
+            moves = []
+            for name in move_names:
+                move = move_rows.get(name)
+                if not move:
+                    continue
+                moves.append({
+                    "name": _visible_zh(name, move_zh.get(name)), "type": move["type_zh"],
+                    "category": move["category"], "power": move["power"],
+                })
+            moves.sort(key=lambda move: (move["type"], move["name"]))
+            ability_zh = translation_map(connection, "ability")
+            abilities = [{
+                "slug": _entity_slug(name), "name": _visible_zh(name, ability_zh.get(name)),
+            } for name in json.loads(row["abilities_json"] or "[]")]
+            forms = []
+            for form in connection.execute(
+                """SELECT * FROM pokemon_forms WHERE season_id=? AND base_name=?
+                   ORDER BY display_name,slug""", (sid, row["base_name"])
+            ):
+                forms.append(_reference_form_summary(form, sprites, localize))
+            base_stats, level_50_stats = _row_stats(row)
+            detail = {
+                **_reference_form_summary(row, sprites, localize),
+                "baseName": _visible_zh(row["base_name"], localize(row["base_name"], row["base_display_name"])),
+                "baseStats": base_stats, "stats": level_50_stats, "abilities": abilities,
+                "moves": moves, "forms": forms,
+            }
+        elif kind == "item":
+            row = connection.execute(
+                """SELECT i.* FROM items i JOIN season_items si ON si.item_name=i.name
+                   WHERE si.season_id=? AND i.slug=?""", (sid, slug)
+            ).fetchone()
+            if not row:
+                return None
+            detail = {
+                "slug": row["slug"], "name": _visible_zh(row["name"], row["name_zh"]),
+                "descriptionZh": row["description_zh"],
+                "pokemon": _related_species(connection, sid, "item", row["name"], sprites, localize),
+            }
+        else:
+            row = connection.execute(
+                "SELECT * FROM abilities WHERE implemented=1 AND slug=?", (slug,)
+            ).fetchone()
+            if not row:
+                return None
+            detail = {
+                "slug": row["slug"], "name": _visible_zh(row["name"], row["name_zh"]),
+                "descriptionZh": row["description_zh"],
+                "pokemon": _related_species(connection, sid, "ability", row["name"], sprites, localize),
+            }
+        return {"meta": _season_meta(connection, season), "kind": kind, "detail": detail}
 
 
 def load_refresh_base():
@@ -491,18 +839,23 @@ def load_refresh_base():
         sid = season["id"]
         catalog = []
         for row in connection.execute("SELECT * FROM pokemon_species WHERE season_id=? ORDER BY id", (sid,)):
+            base_stats, level_50_stats = _row_stats(row)
             catalog.append({
                 "slug": row["slug"], "name": row["name"], "displayName": row["display_name"],
                 "sprite": row["sprite"], "types": json.loads(row["types_json"]),
-                "stats": json.loads(row["stats_json"]), "battles": json.loads(row["battles_json"]),
+                "baseStats": base_stats, "stats": level_50_stats,
+                "battles": json.loads(row["battles_json"]),
             })
         calculator = []
         for row in connection.execute("SELECT * FROM pokemon_forms WHERE season_id=? ORDER BY id", (sid,)):
+            base_stats, level_50_stats = _row_stats(row)
             calculator.append({
                 "slug": row["slug"], "name": row["name"], "baseName": row["base_name"],
                 "displayName": row["display_name"], "baseDisplayName": row["base_display_name"],
                 "searchText": row["search_text"], "sprite": row["sprite"],
-                "types": json.loads(row["types_json"]), "stats": json.loads(row["stats_json"]),
+                "types": json.loads(row["types_json"]), "baseStats": base_stats,
+                "stats": level_50_stats,
+                "abilities": json.loads(row["abilities_json"] or "[]"),
                 "learnableMoves": json.loads(row["learnable_moves_json"]),
             })
         return {
@@ -544,6 +897,21 @@ def health_info():
             "sprites": {"cached": sprite_counts["cached"] or 0, "total": sprite_counts["total"]},
             "translationCoverage": _translation_coverage(connection, season),
             "movePoolCoverage": _move_pool_coverage(connection, season),
+            "statCoverage": _stat_coverage(connection, season),
+            "referenceCoverage": {
+                "items": {
+                    "total": connection.execute("SELECT COUNT(*) FROM items WHERE implemented=1").fetchone()[0],
+                    "missingDescription": connection.execute(
+                        "SELECT COUNT(*) FROM items WHERE implemented=1 AND TRIM(description_zh)=''"
+                    ).fetchone()[0],
+                },
+                "abilities": {
+                    "total": connection.execute("SELECT COUNT(*) FROM abilities WHERE implemented=1").fetchone()[0],
+                    "missingDescription": connection.execute(
+                        "SELECT COUNT(*) FROM abilities WHERE implemented=1 AND TRIM(description_zh)=''"
+                    ).fetchone()[0],
+                },
+            },
         }
 
 

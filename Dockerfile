@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r server/requirements.txt
 
 COPY server ./server
 COPY dist ./dist
+COPY tools ./tools
 RUN mkdir -p /data/sprites && useradd --create-home --uid 10001 champion && chown -R champion:champion /app /data
 
 USER champion

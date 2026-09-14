@@ -6,7 +6,10 @@ import threading
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_compress import Compress
 
-from db import DB_PATH, health_info, init_database, load_bootstrap, load_calculator, load_usage
+from db import (
+    DB_PATH, health_info, init_database, load_bootstrap, load_calculator,
+    load_reference, load_reference_detail, load_usage,
+)
 from importer import refresh
 from sprites import cached_sprite, schedule_warmup, warmup_status
 
@@ -61,6 +64,29 @@ def usage():
 @app.get("/api/calculator")
 def calculator():
     return _json_response(load_calculator(), "public, max-age=300, stale-while-revalidate=86400")
+
+
+@app.get("/api/reference")
+def reference_list():
+    kind = request.args.get("kind", "pokemon")
+    try:
+        limit = int(request.args.get("limit", "60"))
+        offset = int(request.args.get("offset", "0"))
+        payload = load_reference(kind, request.args.get("q", ""), limit, offset)
+    except (TypeError, ValueError) as error:
+        return jsonify({"error": str(error) or "分页参数无效"}), 400
+    return _json_response(payload, "public, max-age=300, stale-while-revalidate=86400")
+
+
+@app.get("/api/reference/<kind>/<slug>")
+def reference_detail(kind, slug):
+    try:
+        payload = load_reference_detail(kind, slug)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    if payload is None:
+        return jsonify({"error": "未找到当前赛季的对应资料"}), 404
+    return _json_response(payload, "public, max-age=300, stale-while-revalidate=86400")
 
 
 @app.post("/api/refresh")

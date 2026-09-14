@@ -10,6 +10,7 @@ from copy import deepcopy
 from html import unescape
 
 from db import database, load_refresh_base, save_snapshot, static_data, translation_map, translation_overrides
+from stat_model import base_from_level_50_neutral, source_level_50_stats
 
 BATTLE_DATA_URL = os.environ.get("BATTLE_DATA_URL", "https://championsbattledata.com/api")
 POKECHAM_BASE_URL = os.environ.get("POKECHAM_BASE_URL", "https://pokechamdb.com").rstrip("/")
@@ -192,11 +193,8 @@ def compact_battle(battle):
     return {"position": battle.get("position"), "top": top, "values": values}
 
 
-def _number(value):
-    try:
-        return int(value) or 1
-    except (TypeError, ValueError):
-        return 1
+def _ability_names(value):
+    return [name.strip() for name in re.split(r"[|,]", str(value or "")) if name.strip()]
 
 
 def valid_item_name(value):
@@ -249,6 +247,8 @@ def normalize(raw, aliases, static):
             name = form.get("title") or form.get("form_name") or pokemon.get("name")
             display_name = form_name(name, pokemon.get("name"))
             base_display_name = zh_name(pokemon.get("name"))
+            level_50_stats = source_level_50_stats(form)
+            base_stats = base_from_level_50_neutral(level_50_stats)
             search_text = " ".join(str(x) for x in (
                 name, pokemon.get("name"), pokemon.get("slug"), pokemon.get("showdownName"),
                 pokemon.get("showdownId"), display_name, base_display_name,
@@ -259,18 +259,28 @@ def normalize(raw, aliases, static):
                 "baseDisplayName": base_display_name, "searchText": search_text, "slug": key,
                 "sprite": asset_url(form.get("image_path") or summary.get("sprite")),
                 "types": [static["typeZh"].get(value, value) for value in form_types],
-                "stats": {"hp":_number(form.get("hp")),"atk":_number(form.get("attack")),"def":_number(form.get("defense")),"spa":_number(form.get("sp_attack")),"spd":_number(form.get("sp_defense")),"spe":_number(form.get("speed"))},
+                "stats": level_50_stats, "baseStats": base_stats,
+                "abilities": _ability_names(form.get("abilities")),
                 "learnableMoves": pokemon.get("learnableMoveNames") or [],
             })
             added_form = True
         if not added_form and not any(battles.values()):
             continue
+        try:
+            primary_level_50_stats = source_level_50_stats(primary)
+            primary_base_stats = base_from_level_50_neutral(primary_level_50_stats)
+        except ValueError:
+            # Battle Data occasionally includes ranking-only aliases without a
+            # metadata form (for example "Vivillon Fancy Pattern"). These rows
+            # are valid for usage lists but must never become calculator forms.
+            primary_level_50_stats = None
+            primary_base_stats = None
         catalog.append({
             "name": pokemon.get("name"), "displayName": zh_name(pokemon.get("name")),
             "slug": pokemon.get("slug"), "sprite": asset_url(summary.get("sprite") or primary.get("image_path")),
             "types": [static["typeZh"].get(value, value) for value in (summary.get("types") or primary.get("types") or [])],
             "battles": battles,
-            "stats": {"hp":_number(primary.get("hp")),"atk":_number(primary.get("attack")),"def":_number(primary.get("defense")),"spa":_number(primary.get("sp_attack")),"spd":_number(primary.get("sp_defense")),"spe":_number(primary.get("speed"))},
+            "stats": primary_level_50_stats, "baseStats": primary_base_stats,
         })
     item_names = sorted({name for name in set(static["implementedItems"]) | observed_items if valid_item_name(name)}, key=lambda value: static["itemZh"].get(value, value))
     return {

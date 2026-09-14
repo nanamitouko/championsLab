@@ -36,8 +36,18 @@ CREATE TABLE IF NOT EXISTS moves (
 
 CREATE TABLE IF NOT EXISTS items (
   name TEXT PRIMARY KEY,
+  slug TEXT UNIQUE,
   name_zh TEXT NOT NULL,
+  description_zh TEXT NOT NULL DEFAULT '',
   implemented INTEGER NOT NULL DEFAULT 1 CHECK(implemented IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS abilities (
+  name TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  name_zh TEXT NOT NULL,
+  description_zh TEXT NOT NULL DEFAULT '',
+  implemented INTEGER NOT NULL DEFAULT 0 CHECK(implemented IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS natures (
@@ -74,6 +84,7 @@ CREATE TABLE IF NOT EXISTS pokemon_species (
   display_name TEXT NOT NULL,
   sprite TEXT,
   types_json TEXT NOT NULL,
+  base_stats_json TEXT NOT NULL,
   stats_json TEXT NOT NULL,
   battles_json TEXT NOT NULL,
   UNIQUE(season_id, slug)
@@ -90,7 +101,9 @@ CREATE TABLE IF NOT EXISTS pokemon_forms (
   search_text TEXT NOT NULL,
   sprite TEXT,
   types_json TEXT NOT NULL,
+  base_stats_json TEXT NOT NULL,
   stats_json TEXT NOT NULL,
+  abilities_json TEXT NOT NULL DEFAULT '[]',
   learnable_moves_json TEXT NOT NULL,
   UNIQUE(season_id, slug)
 );
@@ -130,4 +143,5 @@ CREATE INDEX IF NOT EXISTS idx_species_season ON pokemon_species(season_id);
 CREATE INDEX IF NOT EXISTS idx_forms_season ON pokemon_forms(season_id);
 CREATE INDEX IF NOT EXISTS idx_moves_season ON season_moves(season_id);
 CREATE INDEX IF NOT EXISTS idx_sprite_assets_season ON sprite_assets(season_id);
-PRAGMA user_version = 4;
+CREATE INDEX IF NOT EXISTS idx_abilities_slug ON abilities(slug);
+PRAGMA user_version = 6;
