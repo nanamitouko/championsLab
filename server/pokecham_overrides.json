@@ -1,0 +1,29 @@
+{
+  "move_ja": {
+    "10まんばりき": "High Horsepower",
+    "10まんボルト": "Thunderbolt",
+    "DDラリアット": "Darkest Lariat"
+  },
+  "item_ja": {
+    "アブソルナイトZ": "Absolite Z",
+    "カイリュナイト": "Dragoninite",
+    "ガブリアスナイトZ": "Garchompite Z",
+    "キラフロルナイト": "Glimmoranite",
+    "グソクムシャナイト": "Golisopite",
+    "ゲッコウガナイト": "Greninjite",
+    "セグレイブナイト": "Baxcalibrite",
+    "ドリュウズナイト": "Excadrite",
+    "フラエッテナイト": "Floettite",
+    "マフォクシナイト": "Delphoxite",
+    "ムクホークナイト": "Staraptite",
+    "ユキメノコナイト": "Froslassite",
+    "ライチュウナイトX": "Raichunite X",
+    "ライチュウナイトY": "Raichunite Y",
+    "リザードナイトX": "Charizardite X",
+    "リザードナイトY": "Charizardite Y",
+    "ルカリオナイトZ": "Lucarionite Z"
+  },
+  "ability_ja": {
+    "すなかくれ": "Sand Veil"
+  }
+}
