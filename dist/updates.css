@@ -90,3 +90,9 @@
 }
 @media(max-width:390px){.nav-btn{font-size:11px}.reference-kind{font-size:13px}.reference-detail{left:7px;right:7px}.reference-stats{grid-template-columns:1fr 1fr}.reference-stat{padding:9px}}
 @media(prefers-reduced-motion:reduce){.reference-detail{transition:none}}
+
+/* Readable type badges: shared by rankings, reference, pickers and calculator. */
+.types{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-top:5px}
+.type-pill{display:inline-flex;align-items:center;justify-content:center;min-height:25px;padding:3px 9px;border:1px solid currentColor;border-radius:999px;background:rgba(255,255,255,.055);background:color-mix(in srgb,currentColor 14%,transparent);font-size:12px;font-weight:800;font-style:normal;line-height:1.25;letter-spacing:.03em;text-shadow:0 1px 1px rgba(0,0,0,.72);box-shadow:inset 0 0 0 1px rgba(255,255,255,.035),0 2px 8px rgba(0,0,0,.14);opacity:1;white-space:nowrap}
+.config-identity .type-pill,.reference-hero .type-pill{min-height:28px;padding:4px 10px;font-size:13px}
+.picker-option .types{flex-shrink:0}

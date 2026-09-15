@@ -65,6 +65,25 @@ class DatabaseTests(unittest.TestCase):
         self.assertNotIn("catalog", payload)
         self.assertIsNone(payload["meta"])
 
+    def test_type_palette_is_readable_on_dark_theme(self):
+        def channels(hex_color):
+            return [int(hex_color[index:index + 2], 16) for index in (1, 3, 5)]
+
+        def luminance(hex_color):
+            normalized = [value / 255 for value in channels(hex_color)]
+            linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in normalized]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        surface_channels = channels("#0d1220")
+        colors = db.load_bootstrap()["static"]["typeColors"]
+        self.assertEqual(18, len(colors))
+        for type_name, color in colors.items():
+            color_channels = channels(color)
+            badge_channels = [round(foreground * 0.14 + background * 0.86) for foreground, background in zip(color_channels, surface_channels)]
+            badge_color = "#" + "".join(f"{value:02x}" for value in badge_channels)
+            contrast = (luminance(color) + 0.05) / (luminance(badge_color) + 0.05)
+            self.assertGreaterEqual(contrast, 4.5, f"{type_name}属性标签对比度不足: {contrast:.2f}:1")
+
     def test_split_snapshot_contracts(self):
         self.save_fixture()
         bootstrap = db.load_bootstrap()
@@ -221,6 +240,12 @@ class DatabaseTests(unittest.TestCase):
         expected_meta = db.load_bootstrap()["meta"]
         self.assertEqual({"meta": expected_meta}, refreshed.get_json())
         self.assertEqual("no-store", refreshed.headers["Cache-Control"])
+
+    def test_unknown_api_returns_json_instead_of_html(self):
+        response = app_module.app.test_client().get("/api/not-a-real-route")
+        self.assertEqual(404, response.status_code)
+        self.assertEqual("application/json", response.content_type)
+        self.assertEqual({"error": "接口不存在"}, response.get_json())
 
     def test_unknown_sprite_returns_local_placeholder(self):
         client = app_module.app.test_client()

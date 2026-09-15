@@ -135,6 +135,8 @@ def index():
 
 @app.get("/<path:path>")
 def static_files(path):
+    if path.startswith("api/"):
+        return jsonify({"error": "接口不存在"}), 404
     response = send_from_directory(DIST_DIR, path)
     if path.endswith((".js", ".css")):
         response.headers["Cache-Control"] = "public, max-age=604800"
